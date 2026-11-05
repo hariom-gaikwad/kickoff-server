@@ -13,7 +13,7 @@ const { Resend } = require("resend");
 
 const app = express();
 app.use(cors({ 
-  origin: "https://kickoff-client.vercel.app", // Put your actual Vercel link here!
+  origin: ["https://kickoff-server-chi.vercel.app", "https://kickoff-client.vercel.app"],
   credentials: true 
 }));
 app.use(express.json());
