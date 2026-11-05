@@ -304,117 +304,59 @@ const userProfileSchema = new mongoose.Schema({
 const UserProfile = mongoose.model("UserProfile", userProfileSchema);
 
 /* ═══════════════════════════════════
-   🔑 USER OTP AUTH
+   🔑 DIRECT USER AUTH (NO OTP)
    ═══════════════════════════════════ */
-const userOTPStore = new Map();
-
-app.post("/auth/send-otp", async (req, res) => {
-  const { email, password, purpose } = req.body;
-  if (!email) return res.status(400).json({ error: "Email required" });
-
-  if (isRateLimited(`userotp:${email}`, 5, 60_000))
-    return res.status(429).json({ error: "Too many attempts. Wait 60s." });
-
-  if (purpose === "signup") {
-    if (!password || password.length < 6)
-      return res.status(400).json({ error: "Password must be at least 6 characters" });
-    const existing = await User.findOne({ email: email.toLowerCase() });
-    if (existing) return res.status(400).json({ error: "Account already exists. Please sign in." });
-  }
-
-  if (purpose === "login") {
-    const existing = await User.findOne({ email: email.toLowerCase() });
-    if (!existing) return res.status(404).json({ error: "No account found. Please create one." });
-  }
-
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  userOTPStore.set(email.toLowerCase(), {
-    otp, purpose,
-    password: password || null,
-    expiresAt: Date.now() + 10 * 60 * 1000,
-  });
-  for (const [k, v] of userOTPStore) if (Date.now() > v.expiresAt) userOTPStore.delete(k);
+app.post("/auth/signup", async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: "Email and password required" });
+  if (password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
 
   try {
-    await sendOTPEmail(email, otp, purpose);
-    console.log(`📧 User OTP (${purpose}) sent to ${email}`);
-    res.json({ success: true, message: "OTP sent to your email" });
-  } catch (mailErr) {
-    console.log(`\n📧 [EMAIL FAILED — DEV FALLBACK]`);
-    console.log(`   User OTP   : ${otp}`);
-    console.log(`   For email  : ${email} (${purpose})`);
-    console.log(`   Error      : ${mailErr.message}\n`);
-    res.json({ success: true, message: "OTP sent (check Railway logs — email failed)" });
-  }
-});
-
-app.post("/auth/verify-signup", async (req, res) => {
-  const { email, otp } = req.body;
-  if (!email || !otp) return res.status(400).json({ error: "Email and OTP required" });
-
-  const entry = userOTPStore.get(email.toLowerCase());
-  if (!entry) return res.status(400).json({ error: "OTP expired or not requested. Send again." });
-  if (Date.now() > entry.expiresAt) {
-    userOTPStore.delete(email.toLowerCase());
-    return res.status(400).json({ error: "OTP expired. Please request a new one." });
-  }
-  if (entry.otp !== otp.trim()) return res.status(400).json({ error: "Invalid OTP. Try again." });
-  if (entry.purpose !== "signup") return res.status(400).json({ error: "Wrong OTP type" });
-
-  userOTPStore.delete(email.toLowerCase());
-
-  try {
-    const existing = await User.findOne({ email: email.toLowerCase() });
+    const cleanEmail = email.trim().toLowerCase();
+    const existing = await User.findOne({ email: cleanEmail });
     if (existing) return res.status(400).json({ error: "Account already exists. Please sign in." });
 
-    const hashed = await bcrypt.hash(entry.password, 10);
-    await new User({ email: email.toLowerCase(), password: hashed }).save();
+    const hashed = await bcrypt.hash(password, 10);
+    await new User({ email: cleanEmail, password: hashed }).save();
 
     await UserProfile.findOneAndUpdate(
-      { email: email.toLowerCase() },
-      { email: email.toLowerCase() },
+      { email: cleanEmail },
+      { email: cleanEmail },
       { upsert: true, new: true }
     );
 
-    const token = jwt.sign({ email: email.toLowerCase() }, process.env.JWT_SECRET || "secret123", { expiresIn: "7d" });
-    console.log(`✅ New user signed up: ${email}`);
-    res.json({ success: true, token, message: "Account created ✅" });
+    const token = jwt.sign({ email: cleanEmail }, process.env.JWT_SECRET || "secret123", { expiresIn: "7d" });
+    console.log(`✅ New user registered (password): ${cleanEmail}`);
+    res.json({ success: true, token, email: cleanEmail, message: "Account created successfully ✅" });
   } catch (err) {
-    console.error("verify-signup error:", err);
+    console.error("signup error:", err);
     res.status(500).json({ error: "Failed to create account" });
   }
 });
 
-app.post("/auth/verify-login", async (req, res) => {
-  const { email, otp } = req.body;
-  if (!email || !otp) return res.status(400).json({ error: "Email and OTP required" });
-
-  const entry = userOTPStore.get(email.toLowerCase());
-  if (!entry) return res.status(400).json({ error: "OTP expired or not requested. Send again." });
-  if (Date.now() > entry.expiresAt) {
-    userOTPStore.delete(email.toLowerCase());
-    return res.status(400).json({ error: "OTP expired. Please request a new one." });
-  }
-  if (entry.otp !== otp.trim()) return res.status(400).json({ error: "Invalid OTP. Try again." });
-  if (entry.purpose !== "login") return res.status(400).json({ error: "Wrong OTP type" });
-
-  userOTPStore.delete(email.toLowerCase());
+app.post("/auth/login", async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: "Email and password required" });
 
   try {
-    const user = await User.findOne({ email: email.toLowerCase() });
-    if (!user) return res.status(404).json({ error: "Account not found" });
+    const cleanEmail = email.trim().toLowerCase();
+    const user = await User.findOne({ email: cleanEmail });
+    if (!user) return res.status(401).json({ error: "No account found with this email" });
+
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) return res.status(401).json({ error: "Incorrect password" });
 
     await UserProfile.findOneAndUpdate(
-      { email: email.toLowerCase() },
-      { email: email.toLowerCase() },
+      { email: cleanEmail },
+      { email: cleanEmail },
       { upsert: true, new: true }
     );
 
-    const token = jwt.sign({ email: email.toLowerCase() }, process.env.JWT_SECRET || "secret123", { expiresIn: "7d" });
-    console.log(`✅ User logged in: ${email}`);
-    res.json({ success: true, token, message: "Login successful ✅" });
+    const token = jwt.sign({ email: cleanEmail }, process.env.JWT_SECRET || "secret123", { expiresIn: "7d" });
+    console.log(`✅ User logged in (password): ${cleanEmail}`);
+    res.json({ success: true, token, email: cleanEmail, message: "Login successful ✅" });
   } catch (err) {
-    console.error("verify-login error:", err);
+    console.error("login error:", err);
     res.status(500).json({ error: "Login failed" });
   }
 });
